@@ -1,25 +1,26 @@
 # type: ignore
 
-import wifi
-import ssl
-import socketpool
-import adafruit_requests
+from wifi import radio
+from ssl import create_default_context
+from socketpool import SocketPool
+from adafruit_requests import Session
+from adafruit_connection_manager import connection_manager_close_all
+from adafruit_datetime import datetime, timezone
 
 import os
 import time
 
-import gc
 import board
-import terminalio
-import displayio
-import rgbmatrix
-import framebufferio
+from gc import mem_free
+from terminalio import FONT
+from rgbmatrix import RGBMatrix
+from framebufferio import FramebufferDisplay
 
 from adafruit_display_shapes.rect import Rect
 from adafruit_display_shapes.circle import Circle
 from adafruit_display_text.label import Label
 
-from displayio import Group
+from displayio import Group, release_displays
 
 
 # 1. USER PARAMETERS
@@ -28,42 +29,54 @@ VERBOSE = False # print data
 SHOW_ALERT = True # show alert icon if active alert for route
 SHOW_LIVE = True # flash live icon if data is live
 
-ON_HOUR = 8 # turn on hour (local time)
-OFF_HOUR = 22 # turn off hour (local time)
+ON_HOUR = 12 # turn on hour (UTC)
+OFF_HOUR = 3 # turn off hour (UTC)
 
-SCROLL_LATENCY = 0.06 # scroll speed (and refresh speed at the end of each scroll)
+TEXT_LABEL_LATENCY = 0.06 # scroll speed for top text label (and refresh speed at the end of each scroll)
+LIVE_ICON_LATENCY = 6 # flash speed for live icon
 
 
 # 2. OTHER PARAMETERS
-TIME_URL = 'http://worldtimeapi.org/api/timezone/America/New_York'
-MTA_STOP_URL = 'https://demo.transiter.dev/systems/us-ny-subway/stops/Q04?skip_service_maps=true&skip_alerts=true&skip_transfers=true'
+
+WIFI_SSID = os.getenv("CIRCUITPY_WIFI_SSID")
+WIFI_PASSWORD = os.getenv("CIRCUITPY_WIFI_PASSWORD")
+
+AIO_USERNAME = os.getenv("ADAFRUIT_AIO_USERNAME")
+AIO_KEY = os.getenv("ADAFRUIT_AIO_KEY")
+TIME_URL = f"https://io.adafruit.com/api/v2/{AIO_USERNAME}/integrations/time/strftime?x-aio-key={AIO_KEY}&fmt=%25Y%3A%25m%3A%25d%3A%25H%3A%25M%3A%25S"
+
+STOP_ID = "Q04" # MTA ID for 86th Street Station
+ROUTE_ID = "Q" # MTA ID for Q Train
+MTA_STOP_URL = f"https://demo.transiter.dev/systems/us-ny-subway/stops/{STOP_ID}?skip_service_maps=true&skip_alerts=true&skip_transfers=true"
 MTA_STOP_URL_DIRECTIONS = ['downtown and brooklyn', 'downtown', 'brooklyn']
+MTA_ROUTE_URL = f"https://demo.transiter.dev/systems/us-ny-subway/routes/{ROUTE_ID}?skip_service_maps=true&skip_estimated_headways=true"
 
-MTA_ROUTE_URL = 'https://demo.transiter.dev/systems/us-ny-subway/routes/Q?skip_service_maps=true&skip_estimated_headways=true'
-
-DISPLAY_WIDTH = 64
-DISPLAY_HEIGHT = 32
+DISPLAY_WIDTH = 64 # pixels
+DISPLAY_HEIGHT = 32 # pixels
 
 BACKGROUND_COLOR = 0x000000 # black
 BIT_DEPTH = 2 # color depth
 
-ROUTE_ICON_FONT = terminalio.FONT # default font
+ROUTE_ICON_FONT = FONT # default font
+TEXT_LABEL_FONT = FONT # default font
+
 ROUTE_ICON_COLOR = 0xFCB80A # yellow
-
-TEXT_LABEL_FONT = terminalio.FONT # default font
 TEXT_LABEL_COLOR = 0x919492 # gray-white
-
 ALERT_ICON_COLOR = 0xB22222 # red
+LIVE_ICON_COLOR = 0x919492 # gray-white
 
-LIVE_ICON_COLOR = 0x919492 # gray-white, 0x3D6A9F blue 1, 0x0134A1 blue 2, 0x024EF2 blue 3
 
-
-# 3. METHOD TO GET CURRENT LOCAL TIME DATA
+# 3. METHOD TO GET CURRENT UTC TIME DATA
 def get_time(requests):
     try:
-        time_response = requests.get(TIME_URL).json()
-        current_time = int(time_response['unixtime'])
-        current_hour = int(time_response['datetime'].split('T')[1].split(':')[0])
+        with requests.get(TIME_URL) as response:
+            time_response = response.text
+                
+        year, month, day, hour, minute, second = map(int, time_response.replace(':', ' ').split())
+
+        current_time = int(datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc).timestamp())
+        current_hour = hour
+
         return current_time, current_hour
     
     except Exception as e:
@@ -72,12 +85,13 @@ def get_time(requests):
 
 
 # 4. METHOD TO GET MTA TRAIN DATA
-def get_data(requests, current_time):
+def get_train(requests, current_time):
     if not current_time:
         return None, None, None, None
     
     try:
         mta_response = requests.get(MTA_STOP_URL).json()
+
         trains = mta_response["stopTimes"]
 
         target_trains = []
@@ -102,14 +116,12 @@ def get_data(requests, current_time):
                 break
                 
         times = [max(0, int(train['remaining_time']/60)) for train in target_trains]
-
         symbol = target_trains[0]['train_symbol']
-
         destination = target_trains[0]['destination_name']
 
         mta_response = requests.get(MTA_ROUTE_URL).json()
         alert = len(mta_response["alerts"]) > 0
-
+        
         return times, symbol, destination, alert
     
     except Exception as e:
@@ -121,28 +133,30 @@ def get_data(requests, current_time):
 def scroll(label):
     group = label[0]
     group.x -= 1  # move label left
-    if group.x < -1*6*len(label.text):  # if label has moved full length, reset to initial position and return True
+
+    if group.x < -1*6*len(label.text):  # if label has moved full length, refresh to initial position and return True
         group.x = 0
         return True
+    
     return False
 
 
-# 6. CONNECT TO WIFI
-wifi.radio.connect(os.getenv("CIRCUITPY_WIFI_SSID"), os.getenv("CIRCUITPY_WIFI_PASSWORD"))
-print(f"\nConnected to {os.getenv('CIRCUITPY_WIFI_SSID')}\n")
+# 6. WIFI SETUP
+radio.connect(os.getenv("CIRCUITPY_WIFI_SSID"), os.getenv("CIRCUITPY_WIFI_PASSWORD"))
+print(f"\nconnected to {os.getenv('CIRCUITPY_WIFI_SSID')}\n")
 
-pool = socketpool.SocketPool(wifi.radio)
-context = ssl.create_default_context()
-requests = adafruit_requests.Session(pool, context)
+pool = SocketPool(radio)
+context = create_default_context()
+requests = Session(pool, context)
 
 
 # 7. DISPLAY SETUP
-displayio.release_displays() # release any existing displays
+release_displays() # release any existing displays
 
 master_group = Group()
 blank_group = Group()
 
-matrix = rgbmatrix.RGBMatrix(
+matrix = RGBMatrix(
     width=DISPLAY_WIDTH,
     height=DISPLAY_HEIGHT,
     bit_depth=BIT_DEPTH,
@@ -167,7 +181,15 @@ matrix = rgbmatrix.RGBMatrix(
     doublebuffer=True,
 )
 
-display = framebufferio.FramebufferDisplay(matrix, auto_refresh=True)
+display = FramebufferDisplay(matrix, auto_refresh=True)
+
+# blank rectangle
+blank_rectangle = Rect(
+    width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT, x=0, y=0, fill=BACKGROUND_COLOR
+)
+
+# draw initialization for blank group
+blank_group.append(blank_rectangle)
 
 # placeholder text labels
 text_label_top = Label(
@@ -186,7 +208,7 @@ border_rectangle_right = Rect(
     width=right_border_width, height=DISPLAY_HEIGHT, x=DISPLAY_WIDTH-right_border_width, y=0, fill=BACKGROUND_COLOR
 )
 
-# 4 circles for route, offset 1 pixel to the right and down
+# circles for route, offset 1 pixel to the right and down
 route_circle_1 = Circle(
     x0=12, y0=15, r=9, fill=ROUTE_ICON_COLOR
 )
@@ -247,41 +269,57 @@ display.refresh()
 
 
 # 8. MAIN LOOP TO SHOW TRAINS
+setup = False
 reset = True
-_, previous_hour = get_time(requests)
+previous_hour = 4 # initialize to midnight (UTC)
 
 while True:
     if reset:
         i = 0
+        active = True
         live = True
 
         if VERBOSE:
-            print(f"free memory: {gc.mem_free()}")
+            print(f"setup: {setup}")
+            print(f"free memory: {mem_free()}")
 
-        # get local time data
+        # get UTC time data
         current_time, current_hour = get_time(requests)
-        if current_time:
+
+        if current_time and isinstance(current_hour, int):
             
-            if (previous_hour != current_hour) or gc.mem_free() < 1000: # reset loop every hour
+            if (previous_hour == 3 and current_hour == 4) or mem_free() < 1000: # restart at midnight (UTC) or low memory
                 display.root_group = blank_group
                 display.refresh()
                 break
+            
+            if ON_HOUR < OFF_HOUR:
+                if current_hour < ON_HOUR or OFF_HOUR <= current_hour: # turn off at night
+                    active = False
+            else:
+                if ON_HOUR > current_hour and current_hour >= OFF_HOUR: # turn off at night
+                    active = False
+            
+            if VERBOSE:
+                print(f"active: {active}\n")
 
-            if current_hour < ON_HOUR or current_hour >= OFF_HOUR: # turn off at night local time
+            if not active:
                 display.root_group = blank_group
                 display.refresh()
                 time.sleep(10)
                 continue
-            
+
+            previous_hour = current_hour
+
             if VERBOSE:
                 print(f"current_time: {current_time}")
                 print(f"current_hour: {current_hour}")
-
+            
         else:
             live = False
 
         # get MTA train data
-        times, symbol, destination, alert = get_data(requests, current_time)
+        times, symbol, destination, alert = get_train(requests, current_time)
 
         if times and symbol and destination and alert in [True, False]:
             
@@ -294,7 +332,7 @@ while True:
             formatted_destination = str(destination)
 
             formatted_alert = bool(alert)
-            
+
             if VERBOSE:
                 print(f"times: {formatted_times}")
                 print(f"symbol: {formatted_symbol}")
@@ -308,6 +346,9 @@ while True:
             print(f"live: {live}\n")
 
         if live:
+            # mark setup as complete
+            setup = True
+            
             # draw text 
             text_label_top = Label(
                 font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text=formatted_destination, x=25, y=10
@@ -332,7 +373,7 @@ while True:
                 else:
                     if len(master_group) >= 12:
                         master_group.pop(11)
-
+            
         else:
             if SHOW_LIVE:
                 # update live icon on master group
@@ -342,23 +383,41 @@ while True:
         # set display root group to master group
         display.root_group = master_group
 
-    # scroll text
-    reset = scroll(text_label_top)
+    # if setup completed
+    if setup:
+        # scroll text and update reset condition
+        reset = scroll(text_label_top)
 
-    # flash live icon if data is live
-    if SHOW_LIVE:
-        if live:
-            if i % 6 == 0:
-                if i % 12 == 0:
+        # flash live icon if data is live
+        if SHOW_LIVE:
+            if live:
+                if i % (LIVE_ICON_LATENCY*2) == 0:
                     master_group.pop(10)
                     master_group.insert(10, live_off_icon)
-                else:
+                elif i % LIVE_ICON_LATENCY == 0:
                     master_group.pop(10)
                     master_group.insert(10, live_on_icon)
 
-    # refresh display to update
-    if not reset:
-        display.refresh(minimum_frames_per_second=0)
+        # refresh display to update
+        if not reset:
+            display.refresh(minimum_frames_per_second=0)
+        
+        i += 1
 
-    i += 1
-    time.sleep(SCROLL_LATENCY)
+        # wait before next iteration
+        time.sleep(TEXT_LABEL_LATENCY)
+
+    # if setup failed
+    else:
+        reset = True
+        
+        # wait before retrying
+        time.sleep(5)
+    
+
+# 9. CLEANUP
+display.root_group = blank_group
+connection_manager_close_all(pool)
+
+if VERBOSE:
+    print("\nrestarting")
