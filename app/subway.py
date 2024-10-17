@@ -31,13 +31,13 @@ SHOW_LIVE = True # flash live icon if data is live
 
 ON_HOUR = 12 # turn on hour (UTC)
 OFF_HOUR = 3 # turn off hour (UTC)
+RESTART_HOUR = 4 # restart hour (UTC)
 
 TEXT_LABEL_LATENCY = 0.06 # scroll speed for top text label (and refresh speed at the end of each scroll)
 LIVE_ICON_LATENCY = 6 # flash speed for live icon
 
 
 # 2. OTHER PARAMETERS
-
 WIFI_SSID = os.getenv("CIRCUITPY_WIFI_SSID")
 WIFI_PASSWORD = os.getenv("CIRCUITPY_WIFI_PASSWORD")
 
@@ -64,6 +64,11 @@ ROUTE_ICON_COLOR = 0xFCB80A # yellow
 TEXT_LABEL_COLOR = 0x919492 # gray-white
 ALERT_ICON_COLOR = 0xB22222 # red
 LIVE_ICON_COLOR = 0x919492 # gray-white
+
+if RESTART_HOUR == 0:
+    RESTART_HOUR_PREV = 23
+else:
+    RESTART_HOUR_PREV = RESTART_HOUR - 1
 
 
 # 3. METHOD TO GET CURRENT UTC TIME DATA
@@ -178,7 +183,7 @@ matrix = RGBMatrix(
     latch_pin=board.MTX_LAT,
     output_enable_pin=board.MTX_OE,
     serpentine=False,
-    doublebuffer=True,
+    doublebuffer=True
 )
 
 display = FramebufferDisplay(matrix, auto_refresh=True)
@@ -193,10 +198,10 @@ blank_group.append(blank_rectangle)
 
 # placeholder text labels
 text_label_top = Label(
-    font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text='', x=25, y=10
+    font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text='', x=25, y=10, scale=1
 )
 text_label_bottom = Label(
-    font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text='', x=25, y=22
+    font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text='', x=25, y=22, scale=1
 )
 
 # border rectangles
@@ -224,10 +229,10 @@ route_circle_4 = Circle(
 
 # symbol for route ("Q")
 route_label_1 = Label(
-    font=TEXT_LABEL_FONT, color=BACKGROUND_COLOR, text='Q', x=12-2, y=15+1, scale=1
+    font=TEXT_LABEL_FONT, color=BACKGROUND_COLOR, text=ROUTE_ID, x=10, y=16, scale=1
 )
 route_label_2 = Label(
-    font=TEXT_LABEL_FONT, color=BACKGROUND_COLOR, text='Q', x=12-1, y=15+1, scale=1
+    font=TEXT_LABEL_FONT, color=BACKGROUND_COLOR, text=ROUTE_ID, x=10+1, y=16, scale=1
 )
 
 # alert true/false icons
@@ -271,7 +276,7 @@ display.refresh()
 # 8. MAIN LOOP TO SHOW TRAINS
 setup = False
 reset = True
-previous_hour = 4 # initialize to midnight (UTC)
+previous_hour = RESTART_HOUR
 
 while True:
     if reset:
@@ -287,8 +292,7 @@ while True:
         current_time, current_hour = get_time(requests)
 
         if current_time and isinstance(current_hour, int):
-            
-            if (previous_hour == 3 and current_hour == 4) or mem_free() < 1000: # restart at midnight (UTC) or low memory
+            if (previous_hour == RESTART_HOUR_PREV and current_hour == RESTART_HOUR) or mem_free() < 1000: # restart at restart hour or low memory
                 display.root_group = blank_group
                 display.refresh()
                 break
@@ -351,10 +355,10 @@ while True:
             
             # draw text 
             text_label_top = Label(
-                font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text=formatted_destination, x=25, y=10
+                font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text=formatted_destination, x=25, y=10, scale=1
             )
             text_label_bottom = Label(
-                font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text=formatted_times, x=25, y=22
+                font=TEXT_LABEL_FONT, color=TEXT_LABEL_COLOR, text=formatted_times, x=25, y=22, scale=1
             )
             
             # update text labels on master group
