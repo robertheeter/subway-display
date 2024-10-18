@@ -43,7 +43,7 @@ WIFI_PASSWORD = os.getenv("CIRCUITPY_WIFI_PASSWORD")
 
 AIO_USERNAME = os.getenv("ADAFRUIT_AIO_USERNAME")
 AIO_KEY = os.getenv("ADAFRUIT_AIO_KEY")
-TIME_URL = f"https://io.adafruit.com/api/v2/{AIO_USERNAME}/integrations/time/strftime?x-aio-key={AIO_KEY}&fmt=%25Y%3A%25m%3A%25d%3A%25H%3A%25M%3A%25S"
+TIME_URL = f"https://io.adafruit.com/api/v2/{AIO_USERNAME}/integrations/time/strftime?x-aio-key={AIO_KEY}&fmt=%25Y%3A%25m%3A%25d%3A%25H%3A%25M%3A%25S&tz=Etc/UTC"
 
 STOP_ID = "Q04" # MTA ID for 86th Street Station
 ROUTE_ID = "Q" # MTA ID for Q Train
@@ -148,7 +148,9 @@ def scroll(label):
 
 # 6. WIFI SETUP
 radio.connect(os.getenv("CIRCUITPY_WIFI_SSID"), os.getenv("CIRCUITPY_WIFI_PASSWORD"))
-print(f"\nconnected to {os.getenv('CIRCUITPY_WIFI_SSID')}\n")
+
+if VERBOSE:
+    print(f"\nconnected to {os.getenv('CIRCUITPY_WIFI_SSID')}\n")
 
 pool = SocketPool(radio)
 context = create_default_context()
@@ -401,7 +403,11 @@ while True:
                 elif i % LIVE_ICON_LATENCY == 0:
                     master_group.pop(10)
                     master_group.insert(10, live_on_icon)
-
+        
+        if reset:
+            master_group.pop(10)
+            master_group.insert(10, live_on_icon)
+        
         # refresh display to update
         if not reset:
             display.refresh(minimum_frames_per_second=0)
